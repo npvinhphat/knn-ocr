@@ -1,14 +1,19 @@
-''' Utility helpers for OCR classification.
-'''
+""" Utility helpers for OCR classification.
+"""
 
 import cv2
 import sys
 import os
 import numpy as np
 import matplotlib
+import operator
 matplotlib.use('TkAgg')
 from matplotlib import pyplot as plt
 import enum
+import difflib
+from sklearn import neighbors
+from time import time
+import warnings
 
 # WHETHER WE PUT THE MODE TESTING ON
 TESTING = True
@@ -17,15 +22,25 @@ TESTING = True
 RESIZED_IMAGE_WIDTH = 20
 RESIZED_IMAGE_HEIGHT = 30
 
-""" Enums
-"""
+# Lower percentage of space w.r.t. medium width
+DEFAULT_SPACE_PERCENTAGE = 0.5
+
+# Enums
 class Ocr(enum.Enum):
     PROJECTION = 1
     CONTOUR = 2
+    COMBINE = 3
+
+    FULL = 1
+
+    # Text Document method
+    DILATION = 1
+
 
 class Mode(enum.Enum):
     OPEN = 0
     CLOSE = 1
+
 
 # Object
 class Box(object):
@@ -36,6 +51,97 @@ class Box(object):
         self.w = w
         self.h = h
 
+    def isAligned(self, other, horizontal = False):
+        if horizontal:
+            return not max(self.x, other.x) < min(self.x + self.w, other.x + other.w)
+        else:
+            return not max(self.y, other.y) < min(self.y + self.h, other.y + other.h)
+
+    def combine(self, other):
+        x = min(self.x, other.x)
+        y = min(self.y, other.y)
+        w = max(self.x + self.w, other.x + other.w) - x
+        h = max(self.y + self.h, other.y + other.h) - y
+        return Box(x, y, w, h)
+
+
+class TextDocument(object):
+    """ A class for storing a single document file with several text blocks."""
+
+    def __init__(self, img):
+        """Initialize a text document."""
+        self.img = img
+        self.textBlocks = []
+
+    def get_text_blocks(self, method=Ocr.DILATION, params=None):
+        """ Get all the text blocks and store inside self.textBlocks."""
+        if len(self.textBlocks) != 0:
+            raise ValueError('self.textLines already achieved!')
+
+        block_boxes = []
+        blocks = []
+        if method == Ocr.DILATION:
+            block_boxes = self._get_text_block_by_dilation(params)
+        else:
+            raise ValueError('Invalid method in get_text_blocks: ' + str(method))
+
+        for block_box in block_boxes:
+            crop_img = self.img[block_box.y: block_box.y + block_box.h, block_box.x: block_box.x + block_box.w]
+            blocks.append(TextBlock(crop_img, block_box))
+
+        # Assign text block inside:
+        self.textBlocks = blocks
+
+    def _get_text_block_by_dilation(self, params=None):
+        # Blur the image
+        blur_img = cv2.GaussianBlur(self.img, (5, 5,), 0)
+        _, thresh_img = cv2.threshold(blur_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Default max components
+        max_components = 4
+        if params and 'max_components' in params:
+            max_components = params['max_components']
+
+        contours = self._find_components(thresh_img, max_components=max_components)
+        block_boxes = []
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            block_boxes.append(Box(x, y, w, h))
+
+        return block_boxes
+
+    def _dilate(self, input, size, iterations=5):
+        # Use a dilation in horizontal for bleeding technique
+        morph_kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, size)
+        dilated_image = cv2.dilate(input, morph_kernel, iterations=iterations)
+        return dilated_image
+
+    def _find_components(self, input_img, max_components=4):
+        """Dilate an image until only max_components left."""
+        count = sys.maxint
+        iterations = 1
+        size = (3, 5)
+        contours = []
+        # inverse input
+        input_inverse = 255 - input_img
+        while count > max_components:
+            dilated_image = self._dilate(input_inverse, size, iterations=iterations)
+            # inverse the dilated image, since find contours only find black pixel
+            if TESTING:
+                cv2.imshow('dilated_image', dilated_image)
+                cv2.waitKey(0)
+            _, contours, _ = cv2.findContours(dilated_image, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            count = len(contours)
+            iterations += 1
+        return contours
+
+    def get_result(self):
+        # Sort text blocks first, in y direction
+        self.textBlocks.sort(key= lambda x:x.box.y)
+        result = ''
+        for textBlock in self.textBlocks:
+            result += textBlock.get_result()
+        return result
 
 class TextBlock(object):
     """ A class for storing a block of text from an image
@@ -52,7 +158,7 @@ class TextBlock(object):
         self.box = box
         self.textLines = []
 
-    def get_text_lines(self, method=Ocr.PROJECTION):
+    def get_text_lines(self, method=Ocr.PROJECTION, params=None):
         """ Get all the text lines and store inside self.textLines
         """
         if len(self.textLines) != 0:
@@ -61,34 +167,39 @@ class TextBlock(object):
         line_boxes = []
         lines = []
         if method == Ocr.PROJECTION:
-            line_boxes = self._get_boxes_by_projection(threshold=250)
+            line_boxes = self._get_boxes_by_projection(params)
         else:
             raise ValueError('Invalid method in get_text_lines: ' + str(method))
 
         for line_box in line_boxes:
-            crop_img = self.img[line_box.y: line_box.y + line_box.h][line_box.x: line_box.x + line_box.w]
+            crop_img = self.img[line_box.y: line_box.y + line_box.h, line_box.x: line_box.x + line_box.w]
             lines.append(TextLine(crop_img, line_box))
 
         # Plot the process
 
+        '''
         if TESTING:
             text_image_copy = self.img.copy()
             for l in line_boxes:
                 cv2.rectangle(text_image_copy, (l.x, l.y), (l.x + l.w, l.y + l.h), (0, 255, 0), 1)
             cv2.imshow('find_characters', text_image_copy)
             cv2.waitKey(0)
-
+        '''
 
         self.textLines = lines
 
-    def _get_boxes_by_projection(self, threshold=250):
+    def _get_boxes_by_projection(self, params):
+        if (params and 'threshold' in params):
+            threshold = params['threshold']
+        else:
+            threshold = 250
+
         # Reduce the gray image into horizontal projection
         reduced = cv2.reduce(self.img, 1, cv2.REDUCE_AVG)
         rows, cols = self.img.shape
 
         # Layout like a 1D image
         horizontal_projection = [x[0] for x in reduced]
-        print type(horizontal_projection)
 
         lines = []
         last_mode = Mode.CLOSE
@@ -114,7 +225,7 @@ class TextBlock(object):
             line.w = len(horizontal_projection) - line.y
             lines.append(line)
 
-
+        '''
         if TESTING:
             plt.figure()
             plot1 = plt.subplot('211')
@@ -124,9 +235,19 @@ class TextBlock(object):
             plt.show()
             cv2.waitKey(0)
             plt.close()
+        '''
 
 
         return lines
+
+    def get_result(self):
+        # Sort text blocks first, in y direction
+        self.textLines.sort(key= lambda x:x.box.y)
+        result = ''
+        for textLine in self.textLines:
+            result += textLine.get_result()
+        result += '\n'
+        return result
 
 
 class TextLine(object):
@@ -144,7 +265,7 @@ class TextLine(object):
         self.box = box
         self.textChars = []
 
-    def get_text_chars(self, method=Ocr.PROJECTION):
+    def get_text_chars(self, method=Ocr.PROJECTION, params=None):
         """ Return all the text chars and store inside self.textChars
         """
         if len(self.textChars) != 0:
@@ -154,9 +275,11 @@ class TextLine(object):
         characters = []
 
         if method == Ocr.PROJECTION:
-            character_boxes = self._get_boxes_by_projection(threshold=250)
+            character_boxes = self._get_boxes_by_projection(params)
         elif method == Ocr.CONTOUR:
             character_boxes = self._get_boxes_by_contour()
+        elif method == Ocr.COMBINE:
+            character_boxes = self._get_boxes_by_combine()
         else:
             raise ValueError('Invalid method in find_characters: ' + str(method))
 
@@ -172,11 +295,17 @@ class TextLine(object):
         for character_box in character_boxes:
             crop_img = self.img[character_box.y: character_box.y + character_box.h,
                               character_box.x: character_box.x + character_box.w]
+
             characters.append(TextChar(crop_img, character_box))
 
         self.textChars = characters
 
-    def _get_boxes_by_projection(self, threshold = 250):
+    def _get_boxes_by_projection(self, params):
+        if params and 'threshold' in params:
+            threshold = params['threshold']
+        else:
+            threshold = 250
+
         reduced = cv2.reduce(self.img, 0, cv2.REDUCE_AVG)
         rows, cols = self.img.shape
 
@@ -184,6 +313,7 @@ class TextLine(object):
         characters = []
         last_mode = Mode.CLOSE
         character = Box()
+
         for i in range(len(vertical_projection)):
             # If the pixels here is considerate
             if (vertical_projection[i] < threshold):
@@ -232,6 +362,46 @@ class TextLine(object):
 
         return characters
 
+    def _get_boxes_by_combine(self):
+        # Get the boxes by contour first
+        boxes = self._get_boxes_by_contour()
+        # Sort the boxes by x
+        sorted_boxes = sorted(boxes, key=operator.attrgetter('x'))
+        boxes = []
+        # Iterate the whole box to get combinable boxes
+        for b in sorted_boxes:
+            if len(boxes) != 0 and b.isAligned(boxes[-1], horizontal=False):
+                boxes[-1] = boxes[-1].combine(b)
+            else:
+                boxes.append(b)
+        # return result
+        return boxes
+
+    def _get_median_width(self):
+        # Sort by width, then get the medium component
+        temp = sorted(self.textChars, key= lambda x:x.box.w)
+        return temp[len(temp) / 2].box.w
+
+    def _contain_space(self, first_char, second_char, median_width, percentage = 0.2):
+        space_width = second_char.box.x - (first_char.box.x + first_char.box.w)
+        if space_width >= median_width * percentage:
+            return True
+        return False
+
+    def get_result(self):
+        # Sort text blocks first, in x direction
+        self.textChars.sort(key= lambda x:x.box.x)
+        result = ''
+        median_width = self._get_median_width()
+        for i, textChar in enumerate(self.textChars):
+            # Check if space exists
+            if i > 0 and self._contain_space(self.textChars[i - 1], self.textChars[i], median_width,
+                                             percentage=DEFAULT_SPACE_PERCENTAGE):
+                result += ' '
+            result += textChar.get_result()
+        result += '\n'
+        return result
+
 
 class TextChar(object):
     """A class to represent a character image.
@@ -245,28 +415,89 @@ class TextChar(object):
     def recognize_char(self, knn):
         self.char = knn.recognize(normalize_image(self.img))
 
+    def get_result(self):
+        return self.char
+
 
 class OcrKnn(object):
     """A class to represent the Knn of the system."""
 
-    def __init__(self, classifications, flattened_images, k = 5):
+    def __init__(self, classifications, flattened_images, n_neighbors = 5, weights = 'uniform', algorithm = 'auto'):
         self.classifications = classifications
         self.flattened_images = flattened_images
-        self.k = k
         self.knn = None
+        self.n_neighbors = n_neighbors
+        self.weights = weights
+        self.algorithm = algorithm
 
     def create_and_train(self):
         """ Create a Knn instance of opencv, then train the knn
         """
-        self.knn = cv2.ml.KNearest_create()
-        self.knn.train(self.flattened_images, cv2.ml.ROW_SAMPLE, self.classifications)
+        # self.knn = cv2.ml.KNearest_create()
+        # self.knn.train(self.flattened_images, cv2.ml.ROW_SAMPLE, self.classifications)
+
+        self.knn = neighbors.KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights,
+                                                  algorithm=self.algorithm)
+        self.knn.fit(self.flattened_images, self.classifications)
 
     def recognize(self, image):
         """ Return a tuple of the recognize character.
         """
         res = np.float32(image.reshape((1, RESIZED_IMAGE_WIDTH * RESIZED_IMAGE_HEIGHT)))
-        ret, results, neighbors, dists = self.knn.findNearest(res, self.k)
-        return str(chr(int(results[0][0])))
+        # ret, results, neighbors, dists = self.knn.findNearest(res, self.k)
+        return str(chr(int(self.knn.predict(res))))
+        # return str(chr(int(results[0][0])))
+
+
+class Timer(object):
+
+    def __init__(self):
+        self.start_time = 0
+        self.end_time = 0
+        self.length = 0
+        self.isTiming = False
+
+    def Start(self):
+        if self.isTiming:
+            warnings.warn('This timer has been started. Consider End() it first.')
+            return
+        self.start_time = time()
+        self.isTiming = True
+
+    def End(self):
+        if not self.isTiming:
+            warnings.warn('This timer has not been started. Consider Start() it before.')
+        self.isTiming = False
+        self.end_time = time()
+        self.length = self.end_time - self.start_time
+
+    def GetCurrent(self):
+        if self.isTiming:
+            return time() - self.start_time
+        return self.length
+
+
+def Similarity(a, b):
+    """
+    Calculate the similarity of a and b. The denominator is len(b).
+    :param a:
+    :param b:
+    :return:
+    """
+    s = difflib.SequenceMatcher(None, a, b)
+    blocks = s.get_matching_blocks()
+    # count all the similar
+    count = 0
+    match_string = ''
+    for block in blocks:
+        match_string += a[block.a:block.a+block.size]
+        count += block.size
+    # return difflib.SequenceMatcher(None, a, b).ratio() * 100.0
+    if TESTING:
+        print 'Longest matches: ' + match_string
+        print 'Differences: '
+        sys.stdout.writelines(list(difflib.Differ().compare(match_string, b)))
+    return count * 100.0 / len(b)
 
 
 # Global method
@@ -280,68 +511,3 @@ def normalize_image(gray_img):
 
 def nothing(x):
     pass
-
-
-# Main
-def main():
-    image = cv2.imread('tests/test_quote.jpg')
-    if image is None:
-        raise ValueError('image Not Found!')
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    rows, cols = gray.shape
-
-    # Print all the line
-    textBlock = TextBlock(gray, Box(0, 0, cols, rows))
-    cv2.imshow('textBlock', textBlock.img)
-    cv2.waitKey(0)
-    textBlock.get_text_lines(method=Ocr.PROJECTION)
-    # for textLine in textBlock.textLines:
-        # cv2.imshow('textLine', textLine.img)
-        # cv2.waitKey(0)
-
-    # Print all the characters
-    for textLine in textBlock.textLines:
-        cv2.imshow('textLine', textLine.img)
-        cv2.waitKey(0)
-        textLine.get_text_chars(method=Ocr.CONTOUR)
-        # for textChar in textLine.textChars:
-            # cv2.imshow('textChar', textChar.img)
-            # cv2.waitKey(0)
-
-    # Recognize all the characters
-    try:
-        classifications = np.loadtxt("classifications.txt", np.float32)
-    except:
-        print "error, unable to open classifications.txt, exiting program\n"
-        os.system("pause")
-        return
-    try:
-        flattened_images = np.loadtxt("flattened_images.txt", np.float32)
-    except:
-        print "error, unable to open flattened_images.txt, exiting program\n"
-        os.system("pause")
-        return
-
-    # Reshape numpy array to 1-d, necessary to pass to call to train
-    classifications = classifications.reshape((classifications.size, 1))
-
-    # Create OcrKnn instance
-    ocrKnn = OcrKnn(classifications, flattened_images, k=5)
-    ocrKnn.create_and_train()
-
-    # Get the result
-    for textLine in textBlock.textLines:
-        cv2.imshow('textLine', textLine.img)
-        # textLine.get_text_chars(method=Ocr.PROJECTION)
-        for textChar in textLine.textChars:
-
-            # Recognize the character
-            textChar.recognize_char(ocrKnn)
-            print textChar.char
-
-
-    cv2.destroyAllWindows()
-
-
-if __name__ == '__main__':
-    main()
