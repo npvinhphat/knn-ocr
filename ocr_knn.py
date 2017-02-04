@@ -16,11 +16,14 @@ from time import time
 import warnings
 
 # WHETHER WE PUT THE MODE TESTING ON
-TESTING = True
+TESTING = False
+
 
 # Image size to resized
 RESIZED_IMAGE_WIDTH = 20
 RESIZED_IMAGE_HEIGHT = 30
+SPLIT_N = 6
+BIN_N = 16
 
 # Lower percentage of space w.r.t. medium width
 DEFAULT_SPACE_PERCENTAGE = 0.5
@@ -30,11 +33,32 @@ class Ocr(enum.Enum):
     PROJECTION = 1
     CONTOUR = 2
     COMBINE = 3
+    BINARY_PROJECTION = 4
 
-    FULL = 1
+    FULL = 5
 
     # Text Document method
-    DILATION = 1
+    DILATION = 6
+
+    # Method to get features
+    SIMPLE_10 = 7
+    HOG = 8
+    AVERAGE = 9
+    SIMPLE_20 = 10
+    SIMPLE_30 = 11
+    SIMPLE_BIN_10 = 12
+    SIMPLE_BIN_20 = 13
+    SIMPLE_BIN_30 = 14
+    SIMPLE_BIN_10_15 = 15
+    SIMPLE_BIN_20_30 = 16
+    SIMPLE_20_30 = 17
+    SIMPLE_10_15 = 18
+    SIMPLE_5 = 19
+    SIMPLE_3_5 = 20
+    SIMPLE_BIN_5 = 21
+    SIMPLE_BIN_3_5 = 22
+
+    # Method for
 
 
 class Mode(enum.Enum):
@@ -68,9 +92,10 @@ class Box(object):
 class TextDocument(object):
     """ A class for storing a single document file with several text blocks."""
 
-    def __init__(self, img):
+    def __init__(self, img, bin_img):
         """Initialize a text document."""
         self.img = img
+        self.bin_img = bin_img
         self.textBlocks = []
 
     def get_text_blocks(self, method=Ocr.DILATION, params=None):
@@ -87,22 +112,27 @@ class TextDocument(object):
 
         for block_box in block_boxes:
             crop_img = self.img[block_box.y: block_box.y + block_box.h, block_box.x: block_box.x + block_box.w]
-            blocks.append(TextBlock(crop_img, block_box))
+            crop_bin_img = self.bin_img[block_box.y: block_box.y + block_box.h, block_box.x: block_box.x + block_box.w]
+            blocks.append(TextBlock(crop_img, crop_bin_img, block_box))
+
+        if TESTING:
+            text_image_copy = cv2.cvtColor(self.img, cv2.COLOR_GRAY2BGR)
+            for l in block_boxes:
+                cv2.rectangle(text_image_copy, (l.x, l.y), (l.x + l.w, l.y + l.h), (0, 255, 0), 1)
+            cv2.imshow('test_blocks', text_image_copy)
+            cv2.waitKey(0)
 
         # Assign text block inside:
         self.textBlocks = blocks
 
     def _get_text_block_by_dilation(self, params=None):
-        # Blur the image
-        blur_img = cv2.GaussianBlur(self.img, (5, 5,), 0)
-        _, thresh_img = cv2.threshold(blur_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         # Default max components
         max_components = 4
         if params and 'max_components' in params:
             max_components = params['max_components']
 
-        contours = self._find_components(thresh_img, max_components=max_components)
+        contours = self._find_components(self.bin_img, max_components=max_components)
         block_boxes = []
         for contour in contours:
             x, y, w, h = cv2.boundingRect(contour)
@@ -123,14 +153,13 @@ class TextDocument(object):
         size = (3, 5)
         contours = []
         # inverse input
-        input_inverse = 255 - input_img
         while count > max_components:
-            dilated_image = self._dilate(input_inverse, size, iterations=iterations)
+            dilated_image = self._dilate(input_img, size, iterations=iterations)
             # inverse the dilated image, since find contours only find black pixel
             if TESTING:
                 cv2.imshow('dilated_image', dilated_image)
                 cv2.waitKey(0)
-            _, contours, _ = cv2.findContours(dilated_image, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            _, contours, _ = cv2.findContours(dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             count = len(contours)
             iterations += 1
         return contours
@@ -143,11 +172,12 @@ class TextDocument(object):
             result += textBlock.get_result()
         return result
 
+
 class TextBlock(object):
     """ A class for storing a block of text from an image
     """
 
-    def __init__(self, img, box):
+    def __init__(self, img, bin_img, box):
         """
         Initialize a TextBlock
         :param img: The image
@@ -155,6 +185,7 @@ class TextBlock(object):
         :param method: method to extract lines from the block
         """
         self.img = img
+        self.bin_img = bin_img
         self.box = box
         self.textLines = []
 
@@ -168,25 +199,107 @@ class TextBlock(object):
         lines = []
         if method == Ocr.PROJECTION:
             line_boxes = self._get_boxes_by_projection(params)
+        elif method == Ocr.BINARY_PROJECTION:
+            line_boxes = self._get_boxes_by_binary_projection(params)
         else:
             raise ValueError('Invalid method in get_text_lines: ' + str(method))
 
         for line_box in line_boxes:
+            x, y, w, h = line_box.x, line_box.y, line_box.w, line_box.h
             crop_img = self.img[line_box.y: line_box.y + line_box.h, line_box.x: line_box.x + line_box.w]
-            lines.append(TextLine(crop_img, line_box))
+            crop_bin_img = self.bin_img[line_box.y: line_box.y + line_box.h, line_box.x: line_box.x + line_box.w]
+            width, height = crop_img.shape
+            if width == 0 or height == 0:
+                continue
+            if TESTING:
+                cv2.imshow('crop_img', crop_img)
+                cv2.waitKey(0)
+            lines.append(TextLine(crop_img, crop_bin_img, line_box))
 
         # Plot the process
 
-        '''
+
         if TESTING:
             text_image_copy = self.img.copy()
             for l in line_boxes:
                 cv2.rectangle(text_image_copy, (l.x, l.y), (l.x + l.w, l.y + l.h), (0, 255, 0), 1)
-            cv2.imshow('find_characters', text_image_copy)
+            cv2.imshow('test_lines', text_image_copy)
             cv2.waitKey(0)
-        '''
 
         self.textLines = lines
+
+    def _get_boxes_by_binary_projection(self, params):
+        threshold = 0
+        density_threshold = 0
+        if (params and 'threshold' in params):
+            threshold = params['threshold']
+        if (params and 'density_threshold' in params):
+            density_threshold = params['density_threshold']
+
+        horizontal_projection = cv2.reduce(self.bin_img, 1, cv2.REDUCE_AVG)
+        horizontal_projection_copy = horizontal_projection.copy()
+
+        hist = horizontal_projection
+        indices_low = horizontal_projection <= threshold
+        indices_high = horizontal_projection > threshold
+        hist[indices_low] = 0
+        hist[indices_high] = 1
+
+        ycoords = []
+        y = 0
+        count = 0
+        is_space = False
+        rows, cols = self.img.shape
+
+        for i in range(rows):
+            if not is_space:
+                if not hist[i, 0]:
+                    is_space = True
+                    count = 1
+                    y = i
+            else:
+                if hist[i, 0] and count > 0:
+                    is_space = False
+                    ycoords.append(y / count)
+                else:
+                    y += i
+                    count += 1
+
+        # Add final line
+        ycoords.append(y / count)
+        line_boxes = []
+        for i in range(len(ycoords)):
+            if i == 0: continue
+            line_boxes.append(Box(0, ycoords[i - 1] + 1, cols, ycoords[i] - ycoords[i - 1] - 1))
+        '''
+        line_boxes = []
+        for i in range(len(ycoords)):
+            if i == len(ycoords) - 1:
+                line_boxes.append(Box(0, ycoords[i] + 1, cols, rows - ycoords[i]))
+            else:
+                line_boxes.append(Box(0, ycoords[i] + 1, cols, ycoords[i + 1] - ycoords[i] - 1))
+        '''
+        if TESTING:
+            temp = cv2.cvtColor(self.bin_img, cv2.COLOR_GRAY2BGR)
+            for y in ycoords:
+                cv2.line(temp, (0, y), (cols, y), (0, 255, 0), 2)
+
+            plt.figure()
+            plot1 = plt.subplot('221')
+            plt.plot(horizontal_projection_copy)
+            plt.subplot('222')
+
+            # Rotate image
+            # frows, cols = thresh_img.shape
+            # M = cv2.getRotationMatrix2D((cols / 2, rows / 2), 90, 1)
+            # dst = cv2.warpAffine(thresh_img, M, (cols, rows))\
+            plt.imshow(temp, cmap='gray')
+            plt.show()
+            plt.close()
+
+        return line_boxes
+
+
 
     def _get_boxes_by_projection(self, params):
         if (params and 'threshold' in params):
@@ -254,7 +367,7 @@ class TextLine(object):
     """ A class to store a block of line for an image.
     """
 
-    def __init__(self, img, box):
+    def __init__(self, img, bin_img, box):
         """
         Initialize and TextBlock
         :param img: The image
@@ -262,6 +375,7 @@ class TextLine(object):
         :param method: method to extract lines from the block
         """
         self.img = img
+        self.bin_img = bin_img
         self.box = box
         self.textChars = []
 
@@ -284,19 +398,22 @@ class TextLine(object):
             raise ValueError('Invalid method in find_characters: ' + str(method))
 
         # Plot the process
-        '''
+
         if TESTING:
+            line_image_copy = cv2.cvtColor(self.img, cv2.COLOR_GRAY2BGR)
             for c in character_boxes:
                 cv2.rectangle(line_image_copy, (c.x, c.y), (c.x + c.w, c.y + c.h), (0, 255, 0), 1)
                 cv2.imshow('find_characters', line_image_copy)
                 cv2.waitKey(0)
-        '''
+
 
         for character_box in character_boxes:
             crop_img = self.img[character_box.y: character_box.y + character_box.h,
                               character_box.x: character_box.x + character_box.w]
+            crop_bin_img = self.bin_img[character_box.y: character_box.y + character_box.h,
+                              character_box.x: character_box.x + character_box.w]
 
-            characters.append(TextChar(crop_img, character_box))
+            characters.append(TextChar(crop_img, crop_bin_img, character_box))
 
         self.textChars = characters
 
@@ -349,11 +466,8 @@ class TextLine(object):
 
     def _get_boxes_by_contour(self):
         characters = []
-        blur_image = cv2.GaussianBlur(self.img, (3, 3), 0)
-        thresh_image = cv2.adaptiveThreshold(blur_image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11,
-                                             2)
-        thresh_image_copy = thresh_image.copy()
-        _, contours, _ = cv2.findContours(thresh_image_copy, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        bin_img_copy = self.bin_img.copy()
+        _, contours, _ = cv2.findContours(bin_img_copy, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for contour in contours:
             rect = cv2.boundingRect(contour)
@@ -407,13 +521,14 @@ class TextChar(object):
     """A class to represent a character image.
     """
 
-    def __init__(self, img, box):
+    def __init__(self, img, bin_img, box):
         self.img = img
+        self.bin_img = bin_img
         self.box = box
         self.char = None
 
-    def recognize_char(self, knn):
-        self.char = knn.recognize(normalize_image(self.img))
+    def recognize_char(self, knn, method):
+        self.char = knn.recognize(self.img, method)
 
     def get_result(self):
         return self.char
@@ -422,9 +537,9 @@ class TextChar(object):
 class OcrKnn(object):
     """A class to represent the Knn of the system."""
 
-    def __init__(self, classifications, flattened_images, n_neighbors = 5, weights = 'uniform', algorithm = 'auto'):
-        self.classifications = classifications
-        self.flattened_images = flattened_images
+    def __init__(self, labels, features, n_neighbors = 5, weights = 'uniform', algorithm = 'auto'):
+        self.labels = labels
+        self.features = features
         self.knn = None
         self.n_neighbors = n_neighbors
         self.weights = weights
@@ -438,12 +553,45 @@ class OcrKnn(object):
 
         self.knn = neighbors.KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights,
                                                   algorithm=self.algorithm)
-        self.knn.fit(self.flattened_images, self.classifications)
+        self.knn.fit(self.features, self.labels)
 
-    def recognize(self, image):
-        """ Return a tuple of the recognize character.
+    def recognize(self, image, method):
+        """ Return a tuple of the recognize character. Input is the gray-image itself.
         """
-        res = np.float32(image.reshape((1, RESIZED_IMAGE_WIDTH * RESIZED_IMAGE_HEIGHT)))
+        res = None
+        if method == Ocr.SIMPLE_3_5:
+            res = preprocess_simple(image, (3, 5))
+        elif method == Ocr.SIMPLE_5:
+            res = preprocess_simple(image, (5, 5))
+        elif method == Ocr.SIMPLE_10:
+            res = preprocess_simple(image, (10, 10))
+        elif method == Ocr.SIMPLE_20:
+            res = preprocess_simple(image, (20, 20))
+        elif method == Ocr.SIMPLE_30:
+            res = preprocess_simple(image, (30, 30))
+        elif method == Ocr.SIMPLE_20_30:
+            res = preprocess_simple(image, (20, 30))
+        elif method == Ocr.SIMPLE_10_15:
+            res = preprocess_simple(image, (10, 15))
+        elif method == Ocr.SIMPLE_BIN_3_5:
+            res = preprocess_simple_binary(image, (3, 5))
+        elif method == Ocr.SIMPLE_BIN_5:
+            res = preprocess_simple_binary(image, (5, 5))
+        elif method == Ocr.SIMPLE_BIN_10:
+            res = preprocess_simple_binary(image, (10, 10))
+        elif method == Ocr.SIMPLE_BIN_20:
+            res = preprocess_simple_binary(image, (20, 20))
+        elif method == Ocr.SIMPLE_BIN_30:
+            res = preprocess_simple_binary(image, (30, 30))
+        elif method == Ocr.SIMPLE_BIN_20_30:
+            res = preprocess_simple_binary(image, (20, 30))
+        elif method == Ocr.SIMPLE_BIN_10_15:
+            res = preprocess_simple_binary(image, (10, 15))
+        elif method == Ocr.HOG:
+            res = preprocess_hog(image)
+        elif method == Ocr.AVERAGE:
+            res = preprocess_average(image)
+        # res = np.float32(image.reshape((1, RESIZED_IMAGE_WIDTH * RESIZED_IMAGE_HEIGHT)))
         # ret, results, neighbors, dists = self.knn.findNearest(res, self.k)
         return str(chr(int(self.knn.predict(res))))
         # return str(chr(int(results[0][0])))
@@ -497,16 +645,85 @@ def Similarity(a, b):
         print 'Longest matches: ' + match_string
         print 'Differences: '
         sys.stdout.writelines(list(difflib.Differ().compare(match_string, b)))
+        print '\n'
     return count * 100.0 / len(b)
 
 
 # Global method
-def normalize_image(gray_img):
-    """Global method to get a normalize image for data set. Use for character image only."""
-    blur_img = cv2.GaussianBlur(gray_img, (5, 5), 0)
-    binary_img = cv2.adaptiveThreshold(blur_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-    resized_img = cv2.resize(binary_img, (RESIZED_IMAGE_WIDTH, RESIZED_IMAGE_HEIGHT))
-    return resized_img
+def preprocess_simple(gray_img, size):
+    """Simply flatten a image to WIDTH * HEIGHT features"""
+    # blur_img = cv2.GaussianBlur(gray_img, (5, 5), 0)
+    # binary_img = cv2.adaptiveThreshold(blur_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+    # resized_img = cv2.resize(binary_img, (RESIZED_IMAGE_WIDTH, RESIZED_IMAGE_HEIGHT))
+    # return resized_img.reshape((1, RESIZED_IMAGE_HEIGHT * RESIZED_IMAGE_WIDTH))
+    width, height = size
+    resized_img = cv2.resize(gray_img, size)
+    return np.float32(resized_img.reshape(-1, width * height) / 255.0)
+
+
+def preprocess_simple_binary(gray_img, size):
+    width, height = size
+    blur_img = cv2.medianBlur(gray_img, 5)
+    _, thresh_img = cv2.threshold(blur_img, 0, 255, cv2.THRESH_OTSU + cv2.THRESH_BINARY_INV)
+    morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    morph_img = cv2.morphologyEx(thresh_img, cv2.MORPH_OPEN, morph_kernel)
+    resized_img = cv2.resize(morph_img, size)
+    return np.float32(resized_img.reshape(-1, width * height))
+
+
+def preprocess_hog(gray_img):
+    """Use hog to calculate the features"""
+
+    resized_img = cv2.resize(gray_img, ((RESIZED_IMAGE_WIDTH, RESIZED_IMAGE_HEIGHT)))
+    gx = cv2.Sobel(resized_img, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(resized_img, cv2.CV_32F, 0, 1)
+    mag, ang = cv2.cartToPolar(gx, gy)
+
+    bin_n = BIN_N
+    bin = np.int32(bin_n * ang / (2 * np.pi))
+
+    bin_cells = bin[0:10, 0:10], bin[0:10, 10:20], bin[0:10, 20:30], \
+                bin[10:20, 0:10], bin[10:20, 10:20], bin[10:20, 20:30]
+    mag_cells = mag[0:10, 0:10], mag[0:10, 10:20], mag[0:10, 20:30], \
+                mag[10:20, 0:10], mag[10:20, 10:20], mag[10:20, 20:30]
+
+    hists = [np.bincount(b.ravel(), m.ravel(), bin_n) for b, m in zip(bin_cells, mag_cells)]
+    hist = np.hstack(hists)
+
+    # transform to Hellinger kernel
+    eps = 1e-7
+    hist /= hist.sum() + eps
+    hist = np.sqrt(hist)
+    hist /= np.linalg.norm(hist) + eps
+
+    return np.float32(hist.reshape(-1, BIN_N * SPLIT_N))
+
+def preprocess_average(gray_img):
+    return None
+
+def preprocess_image(gray_img, skew_correction=False):
+    """Return a tuple of original gray image after skew and the binary image after skew."""
+    blur_img = cv2.medianBlur(gray_img, 5)
+    thresh_img = cv2.adaptiveThreshold(blur_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+    morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    morph_img = cv2.morphologyEx(thresh_img, cv2.MORPH_OPEN, morph_kernel)
+
+    # Skew correction
+    if skew_correction:
+        pts = cv2.findNonZero(morph_img)
+        rect = cv2.minAreaRect(pts)
+        box = cv2.boxPoints(rect)
+        center, _, angle = rect
+        pts = np.array(box, np.int32)
+        pts = pts.reshape((-1, 1, 2))
+        m = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rows, cols = morph_img.shape
+
+        rotated_gray = cv2.warpAffine(gray_img, m, (cols, rows))
+        rotated_bin = cv2.warpAffine(morph_img, m, (cols, rows))
+        return rotated_gray, rotated_bin
+
+    return gray_img, morph_img
 
 
 def nothing(x):

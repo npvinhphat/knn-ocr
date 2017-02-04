@@ -13,9 +13,22 @@ import shutil
 
 PATH_TO_RAW = 'train_images/raw'
 PATH_TO_CUT = 'train_images/cut'
+
 # Modify this list to add your own data to cut
-DATA = ['news-gothic-mt.png', 'rockwell.png',
-        'segoe-print.png', 'times-new-roman.png', 'tw-cen-mt.png']
+'''DATA = [x for x, y in [('gill-sans.png', 'abcxyz.txt'),
+                 ('calibri.png', 'abcxyz.txt'),
+                 ('arial.png', 'abcxyz.txt'),
+                 ('times-new-roman.png', 'abcxyz.txt'),
+                 ('rockwell.png', 'abcxyz.txt'),
+                 ('lucida-sans.png', 'abcxyz.txt'),
+                 ('adabi-mt.png', 'abcxyz.txt'),
+                 ('tw-cen-mt.png','abcxyz.txt'),
+                 ('cambria.png','abcxyz.txt'),
+                 ('news-gothic-mt.png', 'abcxyz.txt'),
+                 ('bodoni-72.png', 'abcxyz.txt'),
+                 ('candara.png','abcxyz.txt')]]'''
+DATA = ['arial.png']
+
 # List of valid characters
 VALID_CHARS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U',
                'V', 'W', 'X', 'Y', 'Z',
@@ -66,6 +79,9 @@ def cut(raw_image):
                     cut_images.append(textChar.img)
                     cut_labels.append(chr(char_int))
                     # Break out of the loop
+                    break
+                elif chr(char_int) == '/':
+                    print 'Do not count this letter!'
                     break
                 else:
                     print 'Invalid character input: ' + str(char_int)

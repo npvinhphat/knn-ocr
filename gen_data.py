@@ -13,11 +13,15 @@ import ocr_knn
 import glob
 
 # Modify this to have different name for your data
-DATA_NAME = 'ten_fonts'
+DATA_NAME = '11_fonts_gray_5'
 
 # Modify this to include different fonts
-DATA_FONTS = ['arial', 'calibri', 'cambria', 'century', 'comic-sans', 'gill-sans', 'helvetica', 'rockwell',
-              'segoe-print', 'times-new-roman']
+DATA_FONTS = ['gill-sans', 'calibri', 'arial', 'times-new-roman', 'rockwell', 'lucida-sans', 'adabi-mt', 'tw-cen-mt',
+              'cambria', 'news-gothic-mt', 'candara']
+
+# Modify this to use different type of features
+# Two supported : 'simple', 'hog'
+FEATURE_METHOD = ocr_knn.Ocr.SIMPLE_BIN_20_30
 
 TRAIN_DATA_PATH = 'train_data'
 CUT_IMAGE_PATH = 'train_images/cut'
@@ -32,8 +36,25 @@ def get_character(file_path):
 
 def main():
     # Initialize the storage
-    flattened_images = np.empty((0, ocr_knn.RESIZED_IMAGE_WIDTH * ocr_knn.RESIZED_IMAGE_HEIGHT))
-    classifications = []
+    features = None
+    if FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_3_5 or FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_3_5:
+        features = np.empty((0, 3 * 5))
+    elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_5 or FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_5:
+        features = np.empty((0, 5 * 5))
+    elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_10 or FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_10:
+        features = np.empty((0, 10 * 10))
+    elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_20 or FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_20:
+        features = np.empty((0, 20 * 20))
+    elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_30 or FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_30:
+        features = np.empty((0, 30 * 30))
+    elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_20_30 or FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_20_30:
+        features = np.empty((0, 20 * 30))
+    elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_10_15 or FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_10_15:
+        features = np.empty((0, 10 * 15))
+    elif FEATURE_METHOD == ocr_knn.Ocr.HOG:
+        # SPLIT_N is the number of image split, each split image is computed by BIN_N bin of hog intensity
+        features = np.empty((0, ocr_knn.SPLIT_N * ocr_knn.BIN_N))
+    labels = []
 
     for data_font in DATA_FONTS:
         data_font_path = os.path.join(CUT_IMAGE_PATH, data_font)
@@ -52,20 +73,49 @@ def main():
             # Find the flattened image
             image = cv2.imread(image_path)
             gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            binary_image = ocr_knn.normalize_image(gray_image)
-            flattened_image = binary_image.reshape((1, ocr_knn.RESIZED_IMAGE_HEIGHT * ocr_knn.RESIZED_IMAGE_WIDTH))
+            feature = None
+            if FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_3_5:
+                feature = ocr_knn.preprocess_simple(gray_image, (3, 5))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_5:
+                feature = ocr_knn.preprocess_simple(gray_image, (5, 5))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_10:
+                feature = ocr_knn.preprocess_simple(gray_image, (10, 10))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_20:
+                feature = ocr_knn.preprocess_simple(gray_image, (20, 20))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_30:
+                feature = ocr_knn.preprocess_simple(gray_image, (30, 30))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_20_30:
+                feature = ocr_knn.preprocess_simple(gray_image, (20, 30))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_10_15:
+                feature = ocr_knn.preprocess_simple(gray_image, (10, 15))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_3_5:
+                feature = ocr_knn.preprocess_simple_binary(gray_image, (3, 5))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_5:
+                feature = ocr_knn.preprocess_simple_binary(gray_image, (5, 5))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_10:
+                feature = ocr_knn.preprocess_simple_binary(gray_image, (10, 10))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_20:
+                feature = ocr_knn.preprocess_simple_binary(gray_image, (20, 20))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_30:
+                feature = ocr_knn.preprocess_simple_binary(gray_image, (30, 30))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_20_30:
+                feature = ocr_knn.preprocess_simple_binary(gray_image, (20, 30))
+            elif FEATURE_METHOD == ocr_knn.Ocr.SIMPLE_BIN_10_15:
+                feature = ocr_knn.preprocess_simple_binary(gray_image, (10, 15))
+            elif FEATURE_METHOD == ocr_knn.Ocr.HOG:
+                feature = ocr_knn.preprocess_hog(gray_image)
 
             # Add inside the data list
-            classifications.append(char_int)
-            flattened_images = np.append(flattened_images, flattened_image, 0)
+            labels.append(char_int)
+            features = np.append(features, feature, 0)
 
 
     # Convert to float32
-    classifications = np.array(classifications, np.float32)
+    labels = np.array(labels, np.float32)
     # Flatten to 1d
-    classifications = classifications.reshape((classifications.size, 1))
+    labels = labels.reshape((labels.size, 1))
 
-    n, _ = classifications.shape
+    n, _ = labels.shape
     print 'Training complete with %d data points!!!' % n
     print 'Saving the result...'
 
@@ -74,8 +124,8 @@ def main():
     if (os.path.isdir(new_path)):
         raise ValueError('The path %s has already exists! Please delete it before proceed!' % new_path)
     os.makedirs(new_path)
-    np.savetxt(os.path.join(new_path, 'classifications.txt'), classifications)
-    np.savetxt(os.path.join(new_path, 'flattened_images.txt'), flattened_images)
+    np.savetxt(os.path.join(new_path, 'labels.txt'), labels)
+    np.savetxt(os.path.join(new_path, 'features.txt'), features)
 
     print 'Result saved at %s!' % new_path
 
